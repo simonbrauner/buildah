@@ -9388,6 +9388,10 @@ _EOF
   diff -u ${TEST_SCRATCH_DIR}/squashed-layered-image-rootfs.txt ${TEST_SCRATCH_DIR}/squashed-not-layered-image-rootfs.txt
 }
 
+@test "bud should preserve parent directory ownership with RUN --mount" {
+  true; # TODO
+}
+
 @test "bud COPY one file to ..../. creates the destination directory" {
   _prefetch busybox
   local contextdir=${TEST_SCRATCH_DIR}/context
