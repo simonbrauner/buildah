@@ -6,11 +6,20 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"path"
 	"strings"
 	"sync"
 	"time"
 
 	digest "github.com/opencontainers/go-digest"
+)
+
+type tarFilterAction int
+
+const (
+	tarFilterKeep  tarFilterAction = iota // write this entry
+	tarFilterSkip                         // discard this entry
+	tarFilterDefer                        // buffer this entry, emit only if a child survives
 )
 
 type digester interface {
@@ -95,7 +104,7 @@ func (t *tarFilterer) Close() error {
 // Note: if "filter" indicates that a given item should be skipped, there is no
 // guarantee that there will not be a subsequent item of type TypeLink, which
 // is a hard link, which points to the skipped item as the link target.
-func newTarFilterer(writeCloser io.WriteCloser, filter func(hdr *tar.Header) (skip, replaceContents bool, replacementContents io.Reader)) io.WriteCloser {
+func newTarFilterer(writeCloser io.WriteCloser, filter func(hdr *tar.Header) (action tarFilterAction, replaceContents bool, replacementContents io.Reader)) io.WriteCloser {
 	pipeReader, pipeWriter := io.Pipe()
 	tarWriter := tar.NewWriter(writeCloser)
 	filterer := &tarFilterer{
@@ -105,16 +114,42 @@ func newTarFilterer(writeCloser io.WriteCloser, filter func(hdr *tar.Header) (sk
 		filterer.closedLock.Lock()
 		closed := filterer.closed
 		filterer.closedLock.Unlock()
+		var deferred []*tar.Header
 		for !closed {
 			tarReader := tar.NewReader(pipeReader)
 			hdr, err := tarReader.Next()
 			for err == nil {
-				var skip, replaceContents bool
+				action := tarFilterKeep
+				var replaceContents bool
 				var replacementContents io.Reader
 				if filter != nil {
-					skip, replaceContents, replacementContents = filter(hdr)
+					action, replaceContents, replacementContents = filter(hdr)
 				}
-				if !skip {
+				switch action {
+				case tarFilterDefer:
+					hdrCopy := *hdr
+					deferred = append(deferred, &hdrCopy)
+				case tarFilterKeep:
+					nameSpec := strings.TrimRight(path.Clean(hdr.Name), "/")
+					for i := 0; i < len(deferred); {
+						deferredName := strings.TrimRight(path.Clean(deferred[i].Name), "/")
+						if strings.HasPrefix(nameSpec, deferredName+"/") {
+							if err = tarWriter.WriteHeader(deferred[i]); err != nil {
+								err = fmt.Errorf("writing deferred tar header for %q: %w", deferred[i].Name, err)
+								break
+							}
+							if err = tarWriter.Flush(); err != nil {
+								err = fmt.Errorf("flushing deferred tar item padding for %q: %w", deferred[i].Name, err)
+								break
+							}
+							deferred = append(deferred[:i], deferred[i+1:]...)
+						} else {
+							i++
+						}
+					}
+					if err != nil {
+						break
+					}
 					if err = tarWriter.WriteHeader(hdr); err != nil {
 						err = fmt.Errorf("writing tar header for %q: %w", hdr.Name, err)
 						break
@@ -138,11 +173,11 @@ func newTarFilterer(writeCloser io.WriteCloser, filter func(hdr *tar.Header) (sk
 					}
 					if err = tarWriter.Flush(); err != nil {
 						err = fmt.Errorf("flushing tar item padding for %q: %w", hdr.Name, err)
-						break
 					}
 				}
 				hdr, err = tarReader.Next()
 			}
+			deferred = nil
 			if !errors.Is(err, io.EOF) {
 				filterer.err = fmt.Errorf("reading tar archive: %w", err)
 				break
@@ -174,12 +209,12 @@ type tarDigester struct {
 	tarFilterer io.WriteCloser
 }
 
-func modifyTarHeaderForDigesting(hdr *tar.Header) (skip, replaceContents bool, replacementContents io.Reader) {
+func modifyTarHeaderForDigesting(hdr *tar.Header) (action tarFilterAction, replaceContents bool, replacementContents io.Reader) {
 	zeroTime := time.Time{}
 	hdr.ModTime = zeroTime
 	hdr.AccessTime = zeroTime
 	hdr.ChangeTime = zeroTime
-	return false, false, nil
+	return tarFilterKeep, false, nil
 }
 
 func newTarDigester(contentType string) digester {

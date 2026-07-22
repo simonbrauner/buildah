@@ -9331,7 +9331,7 @@ _EOF
   run tar tf ${TEST_SCRATCH_DIR}/oci-image/"${lastlayer}"
   echo "$output"
   assert "$status" = "0"
-  #assert "${#lines[*]}" = "1" TODO
+  assert "${#lines[*]}" = "1"
 }
 
 @test "bud should include excluded pulled up parent directories in squashed images" {

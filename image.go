@@ -1445,7 +1445,7 @@ func makeFilteredLayerWriteCloser(wc io.WriteCloser, layerModTime, layerLatestMo
 		pullUpsMap[pathSpec] = pullUpSpec
 	}
 	var initialized bool
-	wc = newTarFilterer(wc, func(hdr *tar.Header) (skip, replaceContents bool, replacementContents io.Reader) {
+	wc = newTarFilterer(wc, func(hdr *tar.Header) (action tarFilterAction, replaceContents bool, replacementContents io.Reader) {
 		modTime := hdr.ModTime
 		if layerModTime != nil || layerLatestModTime != nil || len(exclusions) != 0 || len(pullUps) != 0 {
 			// Changing a zeroed field to a non-zero field can affect the
@@ -1458,10 +1458,12 @@ func makeFilteredLayerWriteCloser(wc io.WriteCloser, layerModTime, layerLatestMo
 				if (conditions.ModTime == nil || conditions.ModTime.Equal(modTime)) &&
 					(conditions.Owner == nil || (conditions.Owner.UID == hdr.Uid && conditions.Owner.GID == hdr.Gid)) &&
 					(conditions.Mode == nil || (*conditions.Mode&os.ModePerm == os.FileMode(hdr.Mode)&os.ModePerm)) {
-					return true, false, nil
+					return tarFilterSkip, false, nil
 				}
 			}
-			// Correct the ownership and mode of parent directories.
+			// Correct the ownership and mode of pulled-up parent
+			// directories, but defer writing them until a child
+			// entry survives the filter.
 			if pullUpSpec, ok := pullUpsMap[nameSpec]; ok {
 				if pullUpSpec.Owner != nil {
 					hdr.Uid = pullUpSpec.Owner.UID
@@ -1470,6 +1472,7 @@ func makeFilteredLayerWriteCloser(wc io.WriteCloser, layerModTime, layerLatestMo
 				if pullUpSpec.Mode != nil {
 					hdr.Mode = int64(*pullUpSpec.Mode & os.ModePerm)
 				}
+				return tarFilterDefer, false, nil
 			}
 		}
 		if layerModTime != nil {
@@ -1519,7 +1522,7 @@ func makeFilteredLayerWriteCloser(wc io.WriteCloser, layerModTime, layerLatestMo
 				hdr.PAXRecords[keyCreationTime] = fmt.Sprintf("%d.%09d", hdr.ModTime.Unix(), hdr.ModTime.Nanosecond())
 			}
 		}
-		return false, false, nil
+		return tarFilterKeep, false, nil
 	})
 	if windows {
 		// prep the archive by writing the Files/ and Hives/ directories to the writer.
